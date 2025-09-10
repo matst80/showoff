@@ -141,6 +141,7 @@ func main() {
 	var cleanupInterval time.Duration
 	var metricsAddr string
 	var debug bool
+	var baseDomain string
 	flag.StringVar(&controlAddr, "control", ":9000", "address for client control connections")
 	flag.StringVar(&publicAddr, "public", ":8080", "public listener address")
 	flag.StringVar(&dataAddr, "data", ":9001", "data connection listener address")
@@ -150,6 +151,7 @@ func main() {
 	flag.DurationVar(&cleanupInterval, "pending-cleanup-interval", 5*time.Second, "interval for sweeping expired pending requests")
 	flag.StringVar(&metricsAddr, "metrics", ":9100", "metrics and health listen address")
 	flag.BoolVar(&debug, "debug", false, "enable debug logs")
+	flag.StringVar(&baseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.Parse()
 
 	if debug {
@@ -196,7 +198,7 @@ func main() {
 	wg.Add(1)
 	go func() { defer wg.Done(); acceptData(ctx, dataLn, state) }()
 	wg.Add(1)
-	go func() { defer wg.Done(); acceptPublic(ctx, pubLn, state, requestTimeout, maxHeaderSize) }()
+	go func() { defer wg.Done(); acceptPublic(ctx, pubLn, state, requestTimeout, maxHeaderSize, baseDomain) }()
 
 	state.mu.Lock()
 	state.ready = true
@@ -362,7 +364,7 @@ func handleDataConn(c net.Conn, state *serverState) {
 	}()
 }
 
-func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requestTimeout time.Duration, maxHeader int) {
+func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requestTimeout time.Duration, maxHeader int, baseDomain string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -377,11 +379,11 @@ func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requ
 			}
 			return
 		}
-		go handlePublicConn(c, state, requestTimeout, maxHeader)
+		go handlePublicConn(c, state, requestTimeout, maxHeader, baseDomain)
 	}
 }
 
-func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, maxHeader int) {
+func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, maxHeader int, baseDomain string) {
 	// Robust header read: read until CRLFCRLF or size limit.
 	header, err := readInitialHeader(c, maxHeader)
 	if err != nil {
@@ -390,7 +392,7 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 		_ = c.Close()
 		return
 	}
-	host, name, _, err := hostparse.ExtractName(header)
+	host, name, _, err := hostparse.ExtractName(header, baseDomain)
 	if err != nil || name == "" {
 		obs.Error("public.host", obs.Fields{"err": fmt.Sprint(err), "host": host})
 		obs.ErrorsTotal.WithLabelValues("public_host").Inc()
