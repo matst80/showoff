@@ -1,0 +1,154 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: showoff-server
+  labels:
+    app: showoff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: showoff
+  template:
+    metadata:
+      labels:
+        app: showoff
+    spec:
+      containers:
+        - name: server
+          image: registry.knatofs.se/showoff-server:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-public=:8080"
+            - "-control=:9000"
+            - "-data=:9001"
+            - "-metrics=:9100"
+            - "-request-timeout=30s"
+            - "-max-header-size=32768"
+          ports:
+            - name: public
+              containerPort: 8080
+            - name: control
+              containerPort: 9000
+            - name: data
+              containerPort: 9001
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: SHOWOFF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: showoff-token
+                  key: token
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+      securityContext:
+        runAsNonRoot: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: showoff-public
+  labels:
+    app: showoff
+spec:
+  selector:
+    app: showoff
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: public
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: showoff-tunnel
+  labels:
+    app: showoff
+spec:
+  selector:
+    app: showoff
+  type: LoadBalancer
+  ports:
+    - name: control
+      port: 9000
+      targetPort: control
+    - name: data
+      port: 9001
+      targetPort: data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: showoff-metrics
+  labels:
+    app: showoff
+spec:
+  selector:
+    app: showoff
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 9100
+      targetPort: metrics
+---
+# Ingress with wildcard host and TLS via cert-manager
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: showoff-wildcard
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/server-snippet: |
+      # Optional: improve proxy timeouts for long tunnels
+      proxy_connect_timeout  5s;
+      proxy_send_timeout     3600s;
+      proxy_read_timeout     3600s;
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - "*.show.knatofs.se"
+      secretName: showoff-wildcard-cert
+  rules:
+    - host: "*.show.knatofs.se"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: showoff-public
+                port:
+                  number: 80
+---
+# Secret placeholder for token (create with real value)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: showoff-token
+stringData:
+  token: "change-me"
