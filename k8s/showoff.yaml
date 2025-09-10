@@ -25,6 +25,7 @@ spec:
             - "-data=:9001"
             - "-metrics=:9100"
             - "-request-timeout=30s"
+            - "-domain=show.knatofs.se"
             - "-max-header-size=32768"
           ports:
             - name: public
