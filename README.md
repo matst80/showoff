@@ -1,6 +1,6 @@
 # showoff
 
-Minimal experimental ngrok-like tunnel (educational prototype).
+Minimal experimental ngrok-like tunnel (educational prototype). Vibe coded so far!!
 
 ## Overview
 
