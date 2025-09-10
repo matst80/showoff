@@ -9,7 +9,10 @@ import (
 // ExtractName parses the initial HTTP request bytes to discover the host header or a path prefix.
 // It returns (hostHeader, name, rewrittenRequest, error). If a path-based prefix /name/ is used, the
 // rewrittenRequest will have that prefix stripped from the path for forwarding to the target.
-func ExtractName(req []byte) (host string, name string, rewritten []byte, err error) {
+// ExtractName parses request headers and optional path to extract client name. If baseDomain is non-empty
+// and the Host header ends with "."+baseDomain, the left-most label before the baseDomain is treated as the name.
+// If baseDomain is empty, the first label of Host is used (legacy behavior).
+func ExtractName(req []byte, baseDomain string) (host string, name string, rewritten []byte, err error) {
 	// naive search for Host: header
 	upper := bytes.ToUpper(req)
 	hostIdx := bytes.Index(upper, []byte("HOST:"))
@@ -21,9 +24,18 @@ func ExtractName(req []byte) (host string, name string, rewritten []byte, err er
 			hostLine = strings.TrimSpace(hostLine)
 			host = hostLine
 			if host != "" {
-				// Take first label as name (subdomain)
-				parts := strings.Split(host, ".")
-				name = parts[0]
+				if baseDomain != "" {
+					if strings.HasSuffix(host, "."+baseDomain) {
+						trimmed := strings.TrimSuffix(host, "."+baseDomain)
+						if trimmed != "" {
+							labels := strings.Split(trimmed, ".")
+							name = labels[len(labels)-1]
+						}
+					}
+				} else {
+					parts := strings.Split(host, ".")
+					name = parts[0]
+				}
 			}
 		}
 	}
