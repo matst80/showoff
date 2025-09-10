@@ -18,7 +18,7 @@ spec:
       containers:
         - name: server
           image: registry.knatofs.se/showoff-server:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - "-public=:8080"
             - "-control=:9000"
