@@ -18,6 +18,7 @@ import (
 func main() {
 	var serverAddr string
 	var dataAddr string
+	var hostOnly string
 	var name string
 	var token string
 	var target string
@@ -25,6 +26,7 @@ func main() {
 	var hostRewrite string
 	flag.StringVar(&serverAddr, "server", "127.0.0.1:9000", "server control address")
 	flag.StringVar(&dataAddr, "data", "127.0.0.1:9001", "server data address")
+	flag.StringVar(&hostOnly, "host", "", "base host; if set and --server/--data not explicitly provided, they default to host:9000 & host:9001")
 	flag.StringVar(&name, "name", "demo", "public name to register")
 	flag.StringVar(&token, "token", "", "shared secret token")
 	flag.StringVar(&target, "target", "127.0.0.1:3000", "local address to expose")
@@ -32,7 +34,26 @@ func main() {
 	flag.StringVar(&hostRewrite, "host-rewrite", "", "rewrite Host header to this value (overrides original)")
 	flag.Parse()
 
-	log.Printf("showoff client starting name=%s target=%s server=%s", name, target, serverAddr)
+	// Detect whether user explicitly set server/data flags.
+	var serverSet, dataSet bool
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "server" {
+			serverSet = true
+		}
+		if f.Name == "data" {
+			dataSet = true
+		}
+	})
+	if hostOnly != "" {
+		if !serverSet {
+			serverAddr = net.JoinHostPort(hostOnly, "9000")
+		}
+		if !dataSet {
+			dataAddr = net.JoinHostPort(hostOnly, "9001")
+		}
+	}
+
+	log.Printf("showoff client starting name=%s target=%s server=%s data=%s", name, target, serverAddr, dataAddr)
 	for {
 		if err := runOnce(serverAddr, dataAddr, name, token, target, stripHost, hostRewrite); err != nil {
 			log.Printf("control connection ended: %v", err)
