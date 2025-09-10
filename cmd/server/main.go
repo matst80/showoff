@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matst80/showoff/internal/httpx"
 	"github.com/matst80/showoff/internal/obs"
 	"github.com/matst80/showoff/internal/proto"
 	hostparse "github.com/matst80/showoff/internal/server"
@@ -142,6 +144,8 @@ func main() {
 	var metricsAddr string
 	var debug bool
 	var baseDomain string
+	var enableProxyProto bool
+	var addXFF bool
 	flag.StringVar(&controlAddr, "control", ":9000", "address for client control connections")
 	flag.StringVar(&publicAddr, "public", ":8080", "public listener address")
 	flag.StringVar(&dataAddr, "data", ":9001", "data connection listener address")
@@ -152,6 +156,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics", ":9100", "metrics and health listen address")
 	flag.BoolVar(&debug, "debug", false, "enable debug logs")
 	flag.StringVar(&baseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
+	flag.BoolVar(&enableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
+	flag.BoolVar(&addXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
 	flag.Parse()
 
 	if debug {
@@ -198,7 +204,10 @@ func main() {
 	wg.Add(1)
 	go func() { defer wg.Done(); acceptData(ctx, dataLn, state) }()
 	wg.Add(1)
-	go func() { defer wg.Done(); acceptPublic(ctx, pubLn, state, requestTimeout, maxHeaderSize, baseDomain) }()
+	go func() {
+		defer wg.Done()
+		acceptPublic(ctx, pubLn, state, requestTimeout, maxHeaderSize, baseDomain, enableProxyProto, addXFF)
+	}()
 
 	state.mu.Lock()
 	state.ready = true
@@ -364,7 +373,7 @@ func handleDataConn(c net.Conn, state *serverState) {
 	}()
 }
 
-func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requestTimeout time.Duration, maxHeader int, baseDomain string) {
+func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requestTimeout time.Duration, maxHeader int, baseDomain string, proxyProto bool, addXFF bool) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -379,22 +388,54 @@ func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requ
 			}
 			return
 		}
-		go handlePublicConn(c, state, requestTimeout, maxHeader, baseDomain)
+		go handlePublicConn(c, state, requestTimeout, maxHeader, baseDomain, proxyProto, addXFF)
 	}
 }
 
-func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, maxHeader int, baseDomain string) {
-	// Robust header read: read until CRLFCRLF or size limit.
-	header, err := readInitialHeader(c, maxHeader)
+func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, maxHeader int, baseDomain string, proxyProto bool, addXFF bool) {
+	origRemote := c.RemoteAddr().String()
+	br := bufio.NewReader(c)
+	var pre []byte
+	var realRemoteIP string
+	if proxyProto {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			obs.Error("public.proxy_proto.read", obs.Fields{"err": err.Error()})
+			_ = c.Close()
+			return
+		}
+		if strings.HasPrefix(line, "PROXY ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 6 {
+				realRemoteIP = parts[2]
+			}
+		} else {
+			pre = append(pre, []byte(line)...)
+		}
+	}
+	parsed, _, err := httpx.ParseRequest(br, maxHeader, pre)
 	if err != nil {
 		obs.Error("public.header", obs.Fields{"err": err.Error()})
 		obs.ErrorsTotal.WithLabelValues("public_header").Inc()
 		_ = c.Close()
 		return
 	}
-	host, name, _, err := hostparse.ExtractName(header, baseDomain)
-	if err != nil || name == "" {
-		obs.Error("public.host", obs.Fields{"err": fmt.Sprint(err), "host": host})
+	hostHeader := parsed.Get("Host")
+	var name string
+	if hostHeader != "" {
+		// Domain extraction
+		fakeHostLine := []byte("Host: " + hostHeader + "\r\n\r\n")
+		_, name, _, _ = hostparse.ExtractName(fakeHostLine, baseDomain)
+	}
+	if name == "" { // fallback path based
+		// Attempt hostparse on reconstructed raw header bytes (for path prefix logic)
+		// Rebuild minimal buffer
+		var raw bytes.Buffer
+		parsed.WriteTo(&raw)
+		_, name, _, _ = hostparse.ExtractName(raw.Bytes(), baseDomain)
+	}
+	if name == "" {
+		obs.Error("public.host", obs.Fields{"host": hostHeader})
 		obs.ErrorsTotal.WithLabelValues("public_host").Inc()
 		_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Gateway"))
 		_ = c.Close()
@@ -406,16 +447,25 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 		_ = c.Close()
 		return
 	}
-	// Create request id
+	if addXFF {
+		clientIP := realRemoteIP
+		if clientIP == "" {
+			clientIP, _, _ = net.SplitHostPort(origRemote)
+		}
+		parsed.AugmentXFF(clientIP)
+	}
 	id, _ := cryptoRandomID(20)
-	pinfo := &pendingInfo{conn: c, initialBuf: header, clientName: name, created: time.Now(), readyCh: make(chan struct{})}
+	// Serialize modified headers to buffer for initialBuf
+	var hdrOut bytes.Buffer
+	parsed.WriteTo(&hdrOut)
+	initial := hdrOut.Bytes()
+	pinfo := &pendingInfo{conn: c, initialBuf: initial, clientName: name, created: time.Now(), readyCh: make(chan struct{})}
 	state.setPending(id, pinfo)
-	// Send request over control
 	_ = writeJSONLine(sess.controlConn, proto.Request{ID: id, Name: name})
 
 	select {
 	case <-pinfo.readyCh:
-		return // data handler took over
+		return
 	case <-time.After(timeout):
 		obs.Error("public.timeout", obs.Fields{"id": id})
 		obs.TunnelTimeoutTotal.Inc()
@@ -437,47 +487,7 @@ func cryptoRandomID(n int) (string, error) {
 }
 
 // readInitialHeader reads from conn until end-of-header marker or size limit.
-func readInitialHeader(conn net.Conn, max int) ([]byte, error) {
-	buf := make([]byte, 0, 1024)
-	chunk := make([]byte, 1024)
-	deadline := time.Now().Add(15 * time.Second)
-	_ = conn.SetReadDeadline(deadline)
-	for {
-		n, err := conn.Read(chunk)
-		if n > 0 {
-			buf = append(buf, chunk[:n]...)
-			// Detect end of headers
-			if hasHeaderEnd(buf) {
-				break
-			}
-			if len(buf) > max {
-				return nil, fmt.Errorf("header too large (%d>%d)", len(buf), max)
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-	return buf, nil
-}
-
-func hasHeaderEnd(b []byte) bool {
-	if len(b) < 4 {
-		return false
-	}
-	// Check for \r\n\r\n or \n\n
-	if strings.Contains(string(b), "\r\n\r\n") {
-		return true
-	}
-	if strings.Contains(string(b), "\n\n") {
-		return true
-	}
-	return false
-}
+// (legacy header read helpers removed; replaced by httpx.ParseRequest)
 
 func runCleanupLoop(ctx context.Context, state *serverState, interval, maxAge time.Duration) {
 	t := time.NewTicker(interval)
