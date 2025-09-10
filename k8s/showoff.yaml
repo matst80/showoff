@@ -109,6 +109,10 @@ metadata:
   name: showoff-metrics
   labels:
     app: showoff
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9100"
+    prometheus.io/path: "/metrics"
 spec:
   selector:
     app: showoff
