@@ -60,12 +60,14 @@ spec:
                 secretKeyRef:
                   name: showoff-token
                   key: token
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-      securityContext:
-        runAsNonRoot: true
+         # securityContext:
+            #runAsNonRoot: true
+            #allowPrivilegeEscalation: false
+            #readOnlyRootFilesystem: true
+      imagePullSecrets:
+        - name: regcred
+      #securityContext:
+        #runAsNonRoot: true
 ---
 apiVersion: v1
 kind: Service
@@ -122,11 +124,11 @@ metadata:
   name: showoff-wildcard
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/server-snippet: |
-      # Optional: improve proxy timeouts for long tunnels
-      proxy_connect_timeout  5s;
-      proxy_send_timeout     3600s;
-      proxy_read_timeout     3600s;
+    # nginx.ingress.kubernetes.io/server-snippet: |
+    #   # Optional: improve proxy timeouts for long tunnels
+    #   proxy_connect_timeout  5s;
+    #   proxy_send_timeout     3600s;
+    #   proxy_read_timeout     3600s;
 spec:
   ingressClassName: nginx
   tls:
