@@ -289,6 +289,27 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 		_ = c.Close()
 		return
 	}
+	// Serve dashboard & state JSON directly on public port if requested
+	if parsed.Method == "GET" && (parsed.URI == "/dashboard" || parsed.URI == "/dashboard/") {
+		// minimal stats page reuse template
+		clients, pending, total, timeouts := state.getStats()
+		var buf bytes.Buffer
+		_ = web.Render(&buf, "dashboard.html", map[string]any{"Clients": clients, "Pending": pending, "Total": total, "Timeouts": timeouts})
+		body := buf.Bytes()
+		head := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nCache-Control: no-store\r\n\r\n", len(body))
+		_, _ = c.Write(append([]byte(head), body...))
+		_ = c.Close()
+		return
+	}
+	if parsed.Method == "GET" && parsed.URI == "/api/state" {
+		clients, pending, total, timeouts := state.getStats()
+		payload := map[string]any{"clients": clients, "pending": pending, "total_tunnels": total, "timeouts": timeouts, "now": time.Now().UTC().Format(time.RFC3339)}
+		b, _ := json.Marshal(payload)
+		head := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nCache-Control: no-store\r\n\r\n", len(b))
+		_, _ = c.Write(append([]byte(head), b...))
+		_ = c.Close()
+		return
+	}
 	hostHeader := parsed.Get("Host")
 	var name string
 	if hostHeader != "" {
@@ -439,6 +460,35 @@ func writeJSONLine(w io.Writer, v any) error {
 func startMetricsServer(addr string, state *serverState) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		clients, pending, total, timeouts := state.getStats()
+		resp := map[string]any{
+			"clients":       clients,
+			"pending":       pending,
+			"total_tunnels": total,
+			"timeouts":      timeouts,
+			"now":           time.Now().UTC().Format(time.RFC3339),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		clients, pending, total, timeouts := state.getStats()
+		data := map[string]any{
+			"Clients":  clients,
+			"Pending":  pending,
+			"Total":    total,
+			"Timeouts": timeouts,
+		}
+		var buf bytes.Buffer
+		if err := web.Render(&buf, "dashboard.html", data); err != nil {
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte("dashboard template missing"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(buf.Bytes())
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

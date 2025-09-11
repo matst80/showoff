@@ -16,4 +16,4 @@ Timeout: {{ .Timeout }}</pre
     If recurring, check client connectivity or increase --request-timeout.
   </div>
 </div>
-{{ end }}
+{{ end }} {{ define "timeout.html" }}{{ template "base" . }}{{ end }}

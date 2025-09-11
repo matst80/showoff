@@ -4,6 +4,7 @@ import (
 	"embed"
 	"html/template"
 	"io"
+	"log"
 	"sync"
 	"time"
 )
@@ -28,5 +29,10 @@ func Render(w io.Writer, name string, data map[string]any) error {
 		data = map[string]any{}
 	}
 	data["Now"] = time.Now().Format(time.RFC822)
-	return tmpl.ExecuteTemplate(w, name, data)
+	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+		// fallback if wrapper definition missing
+		log.Printf("template %q exec error: %v", name, err)
+		return tmpl.ExecuteTemplate(w, "base", data)
+	}
+	return nil
 }

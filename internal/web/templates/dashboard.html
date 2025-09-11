@@ -1,0 +1,17 @@
+{{ define "title" }}Status Dashboard · Showoff{{ end }} {{ define "body" }}
+<div class="card">
+  <span class="badge">STATUS</span>
+  <h2>Tunnel Status</h2>
+  <ul>
+    <li><strong>Active Clients:</strong> {{ .Clients }}</li>
+    <li><strong>Pending Requests:</strong> {{ .Pending }}</li>
+    <li><strong>Total Tunnels:</strong> {{ .Total }}</li>
+    <li><strong>Timeouts:</strong> {{ .Timeouts }}</li>
+  </ul>
+  <div class="actions">
+    <a class="btn" href="/dashboard">Refresh</a>
+    <a class="btn" style="background: #1f2937" href="/metrics">Metrics</a>
+  </div>
+  <div class="dim">Auto-refresh with JS could be added later.</div>
+</div>
+{{ end }} {{ define "dashboard.html" }}{{ template "base" . }}{{ end }}
