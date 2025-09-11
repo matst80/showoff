@@ -6,12 +6,17 @@ ENV CGO_ENABLED=0
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN go build -o /out/showoff-server ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	go build -trimpath -ldflags "-s -w" -o /out/showoff-server ./cmd/server
 
 # Final minimal image
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /app
 COPY --from=build /out/showoff-server /app/showoff-server
+# (Optional) Retain templates directory for inspection / future non-embedded usage
+COPY --from=build /src/internal/web/templates /app/templates
+ENV SHOWOFF_TEMPLATES_DIR=/app/templates
 USER nonroot:nonroot
 EXPOSE 8080 9000 9001 9100
 ENTRYPOINT ["/app/showoff-server"]

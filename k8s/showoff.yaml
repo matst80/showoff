@@ -151,6 +151,13 @@ spec:
                 name: showoff-public
                 port:
                   number: 80
+          - path: /dashboard
+            pathType: Prefix
+            backend:
+              service:
+                name: showoff-metrics
+                port:
+                  number: 9100
 ---
 # Secret placeholder for token (create with real value)
 apiVersion: v1

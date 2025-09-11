@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -25,21 +23,11 @@ import (
 	"github.com/matst80/showoff/internal/obs"
 	"github.com/matst80/showoff/internal/proto"
 	hostparse "github.com/matst80/showoff/internal/server"
+	"github.com/matst80/showoff/internal/web"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-//go:embed templates/*.html
-var templateFS embed.FS
-
-var templates *template.Template
-
-func init() {
-	var err error
-	templates, err = template.ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		panic(fmt.Sprintf("Failed to parse templates: %v", err))
-	}
-}
+// Template embedding moved to internal/web package.
 
 func main() {
 
@@ -117,8 +105,8 @@ func acceptControl(ctx context.Context, ln net.Listener, state *serverState, cfg
 		}
 		c, err := ln.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				obs.Error("accept.control.temp", obs.Fields{"err": err.Error()})
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				obs.Error("accept.control.timeout", obs.Fields{"err": err.Error()})
 				continue
 			}
 			return
@@ -185,8 +173,8 @@ func acceptData(ctx context.Context, ln net.Listener, state *serverState) {
 		}
 		c, err := ln.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				obs.Error("accept.data.temp", obs.Fields{"err": err.Error()})
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				obs.Error("accept.data.timeout", obs.Fields{"err": err.Error()})
 				continue
 			}
 			return
@@ -263,8 +251,8 @@ func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, cfg 
 		}
 		c, err := ln.Accept()
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				obs.Error("accept.public.temp", obs.Fields{"err": err.Error()})
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				obs.Error("accept.public.timeout", obs.Fields{"err": err.Error()})
 				continue
 			}
 			return
@@ -318,14 +306,12 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 	if name == "" {
 		obs.Error("public.host", obs.Fields{"host": hostHeader})
 		obs.ErrorsTotal.WithLabelValues("public_host").Inc()
-		_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Gateway"))
-		_ = c.Close()
+		writeErrorTemplate(c, 404, "notfound.html", ErrorPageData{Name: hostHeader})
 		return
 	}
 	sess := state.getClient(name)
 	if sess == nil {
-		_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Gateway"))
-		_ = c.Close()
+		writeErrorTemplate(c, 502, "down.html", ErrorPageData{Name: name})
 		return
 	}
 	if addXFF {
@@ -352,10 +338,66 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 		obs.TunnelTimeoutTotal.Inc()
 		obs.ErrorsTotal.WithLabelValues("timeout").Inc()
 		if state.popPending(id) != nil {
-			_, _ = c.Write([]byte("HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain\r\nContent-Length: 15\r\n\r\nGateway Timeout"))
-			_ = c.Close()
+			writeErrorTemplate(c, 504, "timeout.html", ErrorPageData{Name: name, ID: id, Timeout: timeout.String(), Wait: timeout.String()})
 		}
 	}
+}
+
+// ErrorPageData structured data for error templates.
+type ErrorPageData struct {
+	Name    string
+	ID      string
+	Timeout string
+	Wait    string
+}
+
+func (e ErrorPageData) toMap() map[string]any {
+	m := map[string]any{}
+	if e.Name != "" {
+		m["Name"] = e.Name
+	}
+	if e.ID != "" {
+		m["ID"] = e.ID
+	}
+	if e.Timeout != "" {
+		m["Timeout"] = e.Timeout
+	}
+	if e.Wait != "" {
+		m["Wait"] = e.Wait
+	}
+	return m
+}
+
+// writeTemplateConn renders an HTML template (with data) to a raw net.Conn; falls back to plain text on error.
+func writeTemplateConn(c net.Conn, status int, tmpl string, headers map[string]string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	var buf bytes.Buffer
+	if err := web.Render(&buf, tmpl, data); err != nil {
+		body := http.StatusText(status)
+		msg := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nCache-Control: no-store\r\n\r\n%s", status, http.StatusText(status), len(body), body)
+		_, _ = c.Write([]byte(msg))
+		_ = c.Close()
+		return
+	}
+	body := buf.Bytes()
+	var headBuf bytes.Buffer
+	fmt.Fprintf(&headBuf, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	fmt.Fprintf(&headBuf, "Content-Type: text/html; charset=utf-8\r\n")
+	fmt.Fprintf(&headBuf, "Content-Length: %d\r\n", len(body))
+	fmt.Fprintf(&headBuf, "Cache-Control: no-store\r\n")
+	for k, v := range headers {
+		fmt.Fprintf(&headBuf, "%s: %s\r\n", k, v)
+	}
+	headBuf.WriteString("\r\n")
+	_, _ = c.Write(append(headBuf.Bytes(), body...))
+	_ = c.Close()
+}
+
+// writeErrorTemplate convenience wrapper using ErrorPageData.
+func writeErrorTemplate(c net.Conn, status int, tmpl string, d ErrorPageData) {
+	writeTemplateConn(c, status, tmpl, nil, d.toMap())
 }
 
 // cryptoRandomID returns a hex string of n bytes (2n chars). For base62 shortened form we could post-process, but hex is fine here.
@@ -384,12 +426,6 @@ func runCleanupLoop(ctx context.Context, state *serverState, interval, maxAge ti
 	}
 }
 
-func proxy(dst net.Conn, src net.Conn) { // retained (unused) for potential future reuse
-	defer dst.Close()
-	defer src.Close()
-	_, _ = io.Copy(dst, src)
-}
-
 func writeJSONLine(w io.Writer, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -399,7 +435,7 @@ func writeJSONLine(w io.Writer, v any) error {
 	return err
 }
 
-// startMetricsServer serves Prometheus metrics, health endpoints, and the dashboard.
+// startMetricsServer serves Prometheus metrics and health endpoints.
 func startMetricsServer(addr string, state *serverState) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -419,122 +455,7 @@ func startMetricsServer(addr string, state *serverState) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
-	
-	// Dashboard routes
-	mux.HandleFunc("/", handleDashboard)
-	mux.HandleFunc("/dashboard", handleDashboard)
-	mux.HandleFunc("/dashboard/", handleDashboard)
-	mux.HandleFunc("/dashboard/metrics", func(w http.ResponseWriter, r *http.Request) {
-		handleDashboardMetrics(w, r, state)
-	})
-	mux.HandleFunc("/dashboard/clients", func(w http.ResponseWriter, r *http.Request) {
-		handleDashboardClients(w, r, state)
-	})
-	
 	if err := http.ListenAndServe(addr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		obs.Error("metrics.server", obs.Fields{"err": err.Error(), "addr": addr})
-	}
-}
-
-type DashboardData struct {
-	ServerHost string
-	Token      string
-	BaseDomain string
-}
-
-type MetricsData struct {
-	ActiveClients   int
-	PendingTunnels  int
-	TotalTunnels    int64
-	Timeouts        int64
-}
-
-type ClientInfo struct {
-	Name      string
-	TimeSince string
-}
-
-type ClientsData struct {
-	Clients []ClientInfo
-}
-
-func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// Determine server host from request or configuration
-	host := r.Host
-	if host == "" {
-		host = "localhost:9100"
-	}
-	// Remove port for display if it's the standard metrics port
-	if strings.HasSuffix(host, ":9100") {
-		host = strings.TrimSuffix(host, ":9100")
-	}
-	
-	data := DashboardData{
-		ServerHost: host,
-		Token:      cfg.Token,
-		BaseDomain: cfg.BaseDomain,
-	}
-	
-	if cfg.BaseDomain == "" {
-		data.BaseDomain = "local"
-	}
-	
-	w.Header().Set("Content-Type", "text/html")
-	if err := templates.ExecuteTemplate(w, "dashboard.html", data); err != nil {
-		obs.Error("dashboard.template", obs.Fields{"err": err.Error()})
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}
-}
-
-func handleDashboardMetrics(w http.ResponseWriter, r *http.Request, state *serverState) {
-	activeClients, pendingTunnels, totalTunnels, timeouts := state.getStats()
-	
-	data := MetricsData{
-		ActiveClients:  activeClients,
-		PendingTunnels: pendingTunnels,
-		TotalTunnels:   totalTunnels,
-		Timeouts:       timeouts,
-	}
-	
-	w.Header().Set("Content-Type", "text/html")
-	if err := templates.ExecuteTemplate(w, "metrics.html", data); err != nil {
-		obs.Error("dashboard.metrics.template", obs.Fields{"err": err.Error()})
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}
-}
-
-func handleDashboardClients(w http.ResponseWriter, r *http.Request, state *serverState) {
-	state.mu.Lock()
-	clients := make([]ClientInfo, 0, len(state.clients))
-	for _, client := range state.clients {
-		timeSince := formatTimeSince(client.lastSeen)
-		clients = append(clients, ClientInfo{
-			Name:      client.name,
-			TimeSince: timeSince,
-		})
-	}
-	state.mu.Unlock()
-	
-	data := ClientsData{
-		Clients: clients,
-	}
-	
-	w.Header().Set("Content-Type", "text/html")
-	if err := templates.ExecuteTemplate(w, "clients.html", data); err != nil {
-		obs.Error("dashboard.clients.template", obs.Fields{"err": err.Error()})
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}
-}
-
-func formatTimeSince(t time.Time) string {
-	since := time.Since(t)
-	if since < time.Minute {
-		return fmt.Sprintf("%ds ago", int(since.Seconds()))
-	} else if since < time.Hour {
-		return fmt.Sprintf("%dm ago", int(since.Minutes()))
-	} else if since < 24*time.Hour {
-		return fmt.Sprintf("%dh ago", int(since.Hours()))
-	} else {
-		return fmt.Sprintf("%dd ago", int(since.Hours()/24))
 	}
 }
