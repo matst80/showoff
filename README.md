@@ -12,8 +12,8 @@ Two binaries:
 Current constraints (initial version):
 
 * Only raw TCP for data; public side expects HTTP and uses Host header subdomain or path prefix `/name/...` to choose client.
-* No TLS / encryption (use within trusted networks or behind your own TLS terminator / reverse proxy like Caddy or nginx).
-* Very small, unauthenticated (optional shared token) and not production-hardened. Use for learning only.
+* Very small and not production-hardened. Use for learning only.
+* Optional authentication (shared token or mTLS certificates).
 
 ## Protocol (line-oriented JSON)
 
@@ -42,6 +42,20 @@ Client opens a new TCP connection to server data port and first line:
 ```
 
 Then raw bidirectional copy begins (initial HTTP request bytes currently NOT re-sent if they were buffered before tunnel establishment – future improvement).
+
+## Security & mTLS
+
+The showoff tunnel now supports mutual TLS (mTLS) authentication for strong security:
+
+```bash
+# Server with mTLS enabled
+./server --tls --tls-cert server.crt --tls-key server.key --tls-ca ca.crt
+
+# Client with mTLS certificates  
+./client --tls --tls-cert client.crt --tls-key client.key --tls-ca ca.crt --server secure.example.com:9000
+```
+
+See [docs/mTLS.md](docs/mTLS.md) for complete configuration guide including certificate generation.
 
 ## Build
 
@@ -181,7 +195,8 @@ Flags are currently used; an upcoming enhancement will mirror them via env vars 
 
 * Forward initial buffered request after tunnel ready.
 * Multiplex multiple streams over single data TCP using yamux or HTTP/2.
-* TLS mutual auth, per-client tokens.
+* ~~TLS mutual auth~~ ✅ **COMPLETED**
+* Per-client tokens (currently supports shared token or mTLS certificates).
 * Web UI / status.
 * UDP support.
 * Idle timeout and better cleanup of pending connections.
