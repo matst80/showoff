@@ -9,9 +9,11 @@
     <li><strong>Timeouts:</strong> {{ .Timeouts }}</li>
   </ul>
   <div class="actions">
-    <a class="btn" href="/dashboard">Refresh</a>
-    <a class="btn" style="background: #1f2937" href="/metrics">Metrics</a>
+    <a class="btn" href="/show-off/dashboard">Refresh</a>
+    <a class="btn" style="background: #1f2937" href="/show-off/metrics"
+      >Metrics</a
+    >
   </div>
   <div class="dim">Auto-refresh with JS could be added later.</div>
 </div>
-{{ end }} {{ define "dashboard.html" }}{{ template "base" . }}{{ end }}
+{{ end }}

@@ -112,7 +112,7 @@ metadata:
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: "9100"
-    prometheus.io/path: "/metrics"
+  prometheus.io/path: "/show-off/metrics"
 spec:
   selector:
     app: showoff
@@ -151,7 +151,21 @@ spec:
                 name: showoff-public
                 port:
                   number: 80
-          - path: /dashboard
+          - path: /show-off/dashboard
+            pathType: Prefix
+            backend:
+              service:
+                name: showoff-metrics
+                port:
+                  number: 9100
+          - path: /show-off/metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: showoff-metrics
+                port:
+                  number: 9100
+          - path: /show-off/api
             pathType: Prefix
             backend:
               service:

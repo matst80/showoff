@@ -15,8 +15,8 @@ FROM gcr.io/distroless/static:nonroot
 WORKDIR /app
 COPY --from=build /out/showoff-server /app/showoff-server
 # (Optional) Retain templates directory for inspection / future non-embedded usage
-COPY --from=build /src/internal/web/templates /app/templates
-ENV SHOWOFF_TEMPLATES_DIR=/app/templates
+#COPY --from=build /src/internal/web/templates /app/templates
+#ENV SHOWOFF_TEMPLATES_DIR=/app/templates
 USER nonroot:nonroot
 EXPOSE 8080 9000 9001 9100
 ENTRYPOINT ["/app/showoff-server"]
