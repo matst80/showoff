@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +27,19 @@ import (
 	hostparse "github.com/matst80/showoff/internal/server"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+//go:embed templates/*.html
+var templateFS embed.FS
+
+var templates *template.Template
+
+func init() {
+	var err error
+	templates, err = template.ParseFS(templateFS, "templates/*.html")
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse templates: %v", err))
+	}
+}
 
 func main() {
 
@@ -211,6 +227,7 @@ func handleDataConn(c net.Conn, state *serverState) {
 	obs.Info("tunnel.established", obs.Fields{"id": data.ID, "initial_bytes": len(pinfo.initialBuf)})
 	close(pinfo.readyCh)
 	obs.TunnelEstablishedTotal.Inc()
+	state.incrementTunnelCount() // Track tunnel count in state
 	// Send initial buffered request bytes to client over data connection BEFORE starting copy loops.
 	if len(pinfo.initialBuf) > 0 {
 		if _, err := c.Write(pinfo.initialBuf); err != nil {
@@ -382,7 +399,7 @@ func writeJSONLine(w io.Writer, v any) error {
 	return err
 }
 
-// startMetricsServer serves Prometheus metrics and simple health endpoints.
+// startMetricsServer serves Prometheus metrics, health endpoints, and the dashboard.
 func startMetricsServer(addr string, state *serverState) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -402,7 +419,122 @@ func startMetricsServer(addr string, state *serverState) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
+	
+	// Dashboard routes
+	mux.HandleFunc("/", handleDashboard)
+	mux.HandleFunc("/dashboard", handleDashboard)
+	mux.HandleFunc("/dashboard/", handleDashboard)
+	mux.HandleFunc("/dashboard/metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleDashboardMetrics(w, r, state)
+	})
+	mux.HandleFunc("/dashboard/clients", func(w http.ResponseWriter, r *http.Request) {
+		handleDashboardClients(w, r, state)
+	})
+	
 	if err := http.ListenAndServe(addr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		obs.Error("metrics.server", obs.Fields{"err": err.Error(), "addr": addr})
+	}
+}
+
+type DashboardData struct {
+	ServerHost string
+	Token      string
+	BaseDomain string
+}
+
+type MetricsData struct {
+	ActiveClients   int
+	PendingTunnels  int
+	TotalTunnels    int64
+	Timeouts        int64
+}
+
+type ClientInfo struct {
+	Name      string
+	TimeSince string
+}
+
+type ClientsData struct {
+	Clients []ClientInfo
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	// Determine server host from request or configuration
+	host := r.Host
+	if host == "" {
+		host = "localhost:9100"
+	}
+	// Remove port for display if it's the standard metrics port
+	if strings.HasSuffix(host, ":9100") {
+		host = strings.TrimSuffix(host, ":9100")
+	}
+	
+	data := DashboardData{
+		ServerHost: host,
+		Token:      cfg.Token,
+		BaseDomain: cfg.BaseDomain,
+	}
+	
+	if cfg.BaseDomain == "" {
+		data.BaseDomain = "local"
+	}
+	
+	w.Header().Set("Content-Type", "text/html")
+	if err := templates.ExecuteTemplate(w, "dashboard.html", data); err != nil {
+		obs.Error("dashboard.template", obs.Fields{"err": err.Error()})
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func handleDashboardMetrics(w http.ResponseWriter, r *http.Request, state *serverState) {
+	activeClients, pendingTunnels, totalTunnels, timeouts := state.getStats()
+	
+	data := MetricsData{
+		ActiveClients:  activeClients,
+		PendingTunnels: pendingTunnels,
+		TotalTunnels:   totalTunnels,
+		Timeouts:       timeouts,
+	}
+	
+	w.Header().Set("Content-Type", "text/html")
+	if err := templates.ExecuteTemplate(w, "metrics.html", data); err != nil {
+		obs.Error("dashboard.metrics.template", obs.Fields{"err": err.Error()})
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func handleDashboardClients(w http.ResponseWriter, r *http.Request, state *serverState) {
+	state.mu.Lock()
+	clients := make([]ClientInfo, 0, len(state.clients))
+	for _, client := range state.clients {
+		timeSince := formatTimeSince(client.lastSeen)
+		clients = append(clients, ClientInfo{
+			Name:      client.name,
+			TimeSince: timeSince,
+		})
+	}
+	state.mu.Unlock()
+	
+	data := ClientsData{
+		Clients: clients,
+	}
+	
+	w.Header().Set("Content-Type", "text/html")
+	if err := templates.ExecuteTemplate(w, "clients.html", data); err != nil {
+		obs.Error("dashboard.clients.template", obs.Fields{"err": err.Error()})
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func formatTimeSince(t time.Time) string {
+	since := time.Since(t)
+	if since < time.Minute {
+		return fmt.Sprintf("%ds ago", int(since.Seconds()))
+	} else if since < time.Hour {
+		return fmt.Sprintf("%dm ago", int(since.Minutes()))
+	} else if since < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(since.Hours()))
+	} else {
+		return fmt.Sprintf("%dd ago", int(since.Hours()/24))
 	}
 }

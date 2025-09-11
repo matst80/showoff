@@ -25,11 +25,13 @@ type pendingInfo struct {
 }
 
 type serverState struct {
-	mu      sync.Mutex
-	clients map[string]*clientSession // name -> session
-	pending map[string]*pendingInfo   // requestID -> outside public connection + buffered bytes
-	closing bool
-	ready   bool
+	mu           sync.Mutex
+	clients      map[string]*clientSession // name -> session
+	pending      map[string]*pendingInfo   // requestID -> outside public connection + buffered bytes
+	closing      bool
+	ready        bool
+	totalTunnels int64 // Total tunnels created
+	timeouts     int64 // Total timeouts
 }
 
 func newServerState() *serverState {
@@ -105,6 +107,8 @@ func (s *serverState) cleanupExpiredPending(maxAge time.Duration) {
 			}
 		}
 	}
+	timeoutCount := int64(len(expired))
+	s.timeouts += timeoutCount
 	obs.PendingTunnels.Set(float64(len(s.pending)))
 	s.mu.Unlock()
 	for _, p := range expired {
@@ -113,4 +117,16 @@ func (s *serverState) cleanupExpiredPending(maxAge time.Duration) {
 		_ = p.conn.Close()
 		obs.TunnelTimeoutTotal.Inc()
 	}
+}
+
+func (s *serverState) incrementTunnelCount() {
+	s.mu.Lock()
+	s.totalTunnels++
+	s.mu.Unlock()
+}
+
+func (s *serverState) getStats() (int, int, int64, int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.clients), len(s.pending), s.totalTunnels, s.timeouts
 }
