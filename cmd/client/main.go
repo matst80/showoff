@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -37,26 +36,6 @@ func waitForDrain(timeout time.Duration) bool {
 }
 
 func main() {
-	flag.Parse()
-	// Determine if user explicitly set server/data flags before applying --host convenience.
-	var serverSet, dataSet bool
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "server" {
-			serverSet = true
-		}
-		if f.Name == "data" {
-			dataSet = true
-		}
-	})
-	if cfg.Host != "" {
-		if !serverSet {
-			cfg.ServerAddr = net.JoinHostPort(cfg.Host, "9000")
-		}
-		if !dataSet {
-			cfg.DataAddr = net.JoinHostPort(cfg.Host, "9001")
-		}
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

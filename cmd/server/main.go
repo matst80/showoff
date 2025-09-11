@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"io"
 	"net"
 	"net/http"
@@ -27,7 +26,7 @@ import (
 )
 
 func main() {
-	flag.Parse()
+
 	if cfg.Debug {
 		obs.EnableDebug(true)
 	}
