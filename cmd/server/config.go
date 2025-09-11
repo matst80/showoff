@@ -25,7 +25,7 @@ var cfg Config
 
 // init registers flags into the global flag set. main() simply parses and uses cfg.
 func init() {
-	flag.Parse()
+	// Register flags first, then parse. (Previously Parse was called before definitions, so flags were ignored.)
 	flag.StringVar(&cfg.ControlAddr, "control", ":9000", "address for client control connections")
 	flag.StringVar(&cfg.PublicAddr, "public", ":8080", "public listener address")
 	flag.StringVar(&cfg.DataAddr, "data", ":9001", "data connection listener address")
@@ -38,4 +38,5 @@ func init() {
 	flag.StringVar(&cfg.BaseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.BoolVar(&cfg.EnableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
 	flag.BoolVar(&cfg.AddXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
+	flag.Parse()
 }

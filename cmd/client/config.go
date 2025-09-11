@@ -23,7 +23,7 @@ var cfg Config
 
 // init registers all client flags into the default flag set.
 func init() {
-	flag.Parse()
+	// Register all flags first; previously Parse was called before definitions so user-supplied flags were ignored.
 	flag.StringVar(&cfg.ServerAddr, "server", "127.0.0.1:9000", "server control address")
 	flag.StringVar(&cfg.DataAddr, "data", "127.0.0.1:9001", "server data address")
 	flag.StringVar(&cfg.Host, "host", "show.knatofs.se", "base host; if set and --server/--data not explicitly provided, they default to host:9000 & host:9001")
@@ -33,8 +33,8 @@ func init() {
 	flag.BoolVar(&cfg.StripHost, "strip-host", false, "remove Host header before sending to local target (HTTP/1.1 may break)")
 	flag.StringVar(&cfg.HostRewrite, "host-rewrite", "", "rewrite Host header to this value (overrides original)")
 	flag.DurationVar(&cfg.GracePeriod, "grace-period", 0, "time to wait for active tunnels to drain after shutdown signal (0 = immediate)")
+	flag.Parse()
 	var serverSet, dataSet bool
-	// Determine if user explicitly set server/data flags before applying --host convenience.
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "server" {
 			serverSet = true
