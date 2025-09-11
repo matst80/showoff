@@ -31,7 +31,7 @@ func main() {
 		obs.EnableDebug(true)
 	}
 	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr})
-	state := newServerState()
+	state := newServerState(&cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -137,6 +137,16 @@ func handleControl(c net.Conn, state *serverState, token string) {
 		_ = writeJSONLine(c, map[string]string{"error": "missing name"})
 		return
 	}
+	
+	// Check rate limiting for client connections
+	if !state.rateLimiter.AllowConnection(auth.Name) {
+		obs.Error("control.rate_limited", obs.Fields{"name": auth.Name, "remote": c.RemoteAddr().String()})
+		obs.ErrorsTotal.WithLabelValues("control_rate_limited").Inc()
+		obs.RateLimitedTotal.WithLabelValues("connection", "client").Inc()
+		_ = writeJSONLine(c, map[string]string{"error": "rate limit exceeded"})
+		return
+	}
+	
 	if err := state.registerClient(auth.Name, &clientSession{name: auth.Name, controlConn: c, lastSeen: time.Now()}); err != nil {
 		obs.ErrorsTotal.WithLabelValues("register_conflict").Inc()
 		_ = writeJSONLine(c, map[string]string{"error": err.Error()})
@@ -207,6 +217,17 @@ func handleDataConn(c net.Conn, state *serverState) {
 		_ = c.Close()
 		return
 	}
+	
+	// Check rate limiting for data connections (tunnel establishment)
+	if !state.rateLimiter.AllowConnection(pinfo.clientName) {
+		obs.Error("data.rate_limited", obs.Fields{"id": data.ID, "client": pinfo.clientName})
+		obs.ErrorsTotal.WithLabelValues("data_rate_limited").Inc()
+		obs.RateLimitedTotal.WithLabelValues("connection", "client").Inc()
+		_ = c.Close()
+		_ = pinfo.conn.Close()
+		return
+	}
+	
 	outside := pinfo.conn
 	obs.Info("tunnel.established", obs.Fields{"id": data.ID, "initial_bytes": len(pinfo.initialBuf)})
 	close(pinfo.readyCh)
@@ -308,6 +329,16 @@ func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, max
 	sess := state.getClient(name)
 	if sess == nil {
 		_, _ = c.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Gateway"))
+		_ = c.Close()
+		return
+	}
+	
+	// Check rate limiting for public requests
+	if !state.rateLimiter.AllowRequest(name) {
+		obs.Error("public.rate_limited", obs.Fields{"name": name, "remote": c.RemoteAddr().String()})
+		obs.ErrorsTotal.WithLabelValues("public_rate_limited").Inc()
+		obs.RateLimitedTotal.WithLabelValues("request", "client").Inc()
+		_, _ = c.Write([]byte("HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 17\r\n\r\nToo Many Requests"))
 		_ = c.Close()
 		return
 	}
