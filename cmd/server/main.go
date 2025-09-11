@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,14 +32,26 @@ func main() {
 	if cfg.Debug {
 		obs.EnableDebug(true)
 	}
-	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr})
+
+	var tlsConfig *tls.Config
+	var err error
+	if cfg.EnableTLS {
+		tlsConfig, err = createServerTLSConfig(&cfg)
+		if err != nil {
+			obs.Error("tls.config", obs.Fields{"err": err.Error()})
+			os.Exit(1)
+		}
+		obs.Info("tls.enabled", obs.Fields{"mtls": cfg.TLSCAFile != ""})
+	}
+
+	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr, "tls": cfg.EnableTLS})
 	state := newServerState()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Start control listener
-	ctrlLn, err := net.Listen("tcp", cfg.ControlAddr)
+	ctrlLn, err := createListener(cfg.ControlAddr, tlsConfig)
 	if err != nil {
 		obs.Error("listen.control", obs.Fields{"err": err.Error(), "addr": cfg.ControlAddr})
 		os.Exit(1)
@@ -45,14 +59,14 @@ func main() {
 	defer ctrlLn.Close()
 
 	// Start data listener
-	dataLn, err := net.Listen("tcp", cfg.DataAddr)
+	dataLn, err := createListener(cfg.DataAddr, tlsConfig)
 	if err != nil {
 		obs.Error("listen.data", obs.Fields{"err": err.Error(), "addr": cfg.DataAddr})
 		os.Exit(1)
 	}
 	defer dataLn.Close()
 
-	// Start public listener
+	// Start public listener (always plain TCP for now)
 	pubLn, err := net.Listen("tcp", cfg.PublicAddr)
 	if err != nil {
 		obs.Error("listen.public", obs.Fields{"err": err.Error(), "addr": cfg.PublicAddr})
@@ -405,4 +419,44 @@ func startMetricsServer(addr string, state *serverState) {
 	if err := http.ListenAndServe(addr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		obs.Error("metrics.server", obs.Fields{"err": err.Error(), "addr": addr})
 	}
+}
+
+// createServerTLSConfig creates a TLS configuration for the server with mTLS support
+func createServerTLSConfig(cfg *Config) (*tls.Config, error) {
+	// Load server certificate and key
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	// If CA file is provided, enable mTLS (mutual authentication)
+	if cfg.TLSCAFile != "" {
+		caCert, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, err
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, errors.New("failed to parse CA certificate")
+		}
+
+		tlsConfig.ClientCAs = caCertPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		obs.Info("tls.mtls_enabled", obs.Fields{"ca_file": cfg.TLSCAFile})
+	}
+
+	return tlsConfig, nil
+}
+
+// createListener creates either a plain TCP or TLS listener based on tlsConfig
+func createListener(addr string, tlsConfig *tls.Config) (net.Listener, error) {
+	if tlsConfig == nil {
+		return net.Listen("tcp", addr)
+	}
+	return tls.Listen("tcp", addr, tlsConfig)
 }

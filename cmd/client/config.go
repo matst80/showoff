@@ -17,6 +17,12 @@ type Config struct {
 	StripHost   bool
 	HostRewrite string
 	GracePeriod time.Duration
+	// TLS configuration for mTLS
+	TLSCertFile      string
+	TLSKeyFile       string
+	TLSCAFile        string
+	EnableTLS        bool
+	InsecureSkipVerify bool
 }
 
 var cfg Config
@@ -33,6 +39,12 @@ func init() {
 	flag.BoolVar(&cfg.StripHost, "strip-host", false, "remove Host header before sending to local target (HTTP/1.1 may break)")
 	flag.StringVar(&cfg.HostRewrite, "host-rewrite", "", "rewrite Host header to this value (overrides original)")
 	flag.DurationVar(&cfg.GracePeriod, "grace-period", 0, "time to wait for active tunnels to drain after shutdown signal (0 = immediate)")
+	// TLS flags for mTLS support
+	flag.BoolVar(&cfg.EnableTLS, "tls", false, "enable TLS for server connections")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS client certificate file path")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS client private key file path")
+	flag.StringVar(&cfg.TLSCAFile, "tls-ca", "", "TLS CA file for server certificate verification")
+	flag.BoolVar(&cfg.InsecureSkipVerify, "tls-insecure", false, "skip TLS certificate verification (insecure)")
 	flag.Parse()
 	var serverSet, dataSet bool
 	flag.Visit(func(f *flag.Flag) {
