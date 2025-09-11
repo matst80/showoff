@@ -160,7 +160,7 @@ curl -H "Host: myapp.example.com" http://127.0.0.1:8080/
 
 ```powershell
 kubectl port-forward svc/showoff-metrics 9100:9100
-curl http://127.0.0.1:9100/metrics
+curl http://127.0.0.1:9100/show-off/metrics
 curl http://127.0.0.1:9100/readyz
 ```
 

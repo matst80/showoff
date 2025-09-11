@@ -1,0 +1,16 @@
+{{ define "title" }}Tunnel Offline · Showoff{{ end }} {{ define "body" }}
+<div class="card">
+  <span class="badge">502</span>
+  <h2 class="status-warn">Tunnel Offline</h2>
+  <p>
+    The tunnel <strong>{{ .Name }}</strong> is registered but not currently
+    reachable or failed to establish a data connection.
+  </p>
+  <ul class="fade">
+    <li>Client maybe restarting</li>
+    <li>Network transient issue</li>
+    <li>Local target service is down</li>
+  </ul>
+  <div class="actions"><a class="btn" href="/">Retry</a></div>
+</div>
+{{ end }}

@@ -1,0 +1,19 @@
+{{ define "title" }}Tunnel Timeout · Showoff{{ end }} {{ define "body" }}
+<div class="card">
+  <span class="badge">504</span>
+  <h2 class="status-err">Tunnel Request Timed Out</h2>
+  <p>
+    The tunnel <strong>{{ .Name }}</strong> did not establish within the allowed
+    time window.
+  </p>
+  <pre>
+Request ID: {{ .ID }}
+Waited: {{ .Wait }}
+Timeout: {{ .Timeout }}</pre
+  >
+  <div class="actions"><a class="btn" href="/">Try Again</a></div>
+  <div class="dim">
+    If recurring, check client connectivity or increase --request-timeout.
+  </div>
+</div>
+{{ end }}
