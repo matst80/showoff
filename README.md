@@ -63,6 +63,12 @@ In another terminal (client exposing local web on 3000):
 go run ./cmd/client --server 127.0.0.1:9000 --data 127.0.0.1:9001 --name myapp --token secret --target 127.0.0.1:5173
 ```
 
+Shortcut: if control & data ports are standard (9000/9001) you can now just specify the host once:
+
+```powershell
+go run ./cmd/client --host 127.0.0.1 --name myapp --token secret --target 127.0.0.1:5173
+```
+
 Access via (adjust Host header). On Windows with curl you can specify:
 
 ```powershell
@@ -116,6 +122,17 @@ go run ./cmd/client `
 	--name myapp `
 	--token change-me `
 	--target 127.0.0.1:5173 `
+	--host-rewrite localhost
+```
+
+Or with the new host shortcut (auto uses :9000 / :9001):
+
+```powershell
+go run ./cmd/client \
+	--host 10.10.3.13 \
+	--name myapp \
+	--token change-me \
+	--target 127.0.0.1:5173 \
 	--host-rewrite localhost
 ```
 
