@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,187 +26,53 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type clientSession struct {
-	name        string
-	controlConn net.Conn
-	lastSeen    time.Time
-}
-
-// pendingInfo tracks an outside public connection waiting for a client data tunnel.
-type pendingInfo struct {
-	conn       net.Conn
-	initialBuf []byte // initial request bytes already consumed from outside
-	clientName string // owning client
-	created    time.Time
-	readyCh    chan struct{} // closed when data tunnel established
-}
-
-type serverState struct {
-	mu      sync.Mutex
-	clients map[string]*clientSession // name -> session
-	pending map[string]*pendingInfo   // requestID -> outside public connection + buffered bytes
-	closing bool
-	ready   bool
-}
-
-func newServerState() *serverState {
-	return &serverState{clients: make(map[string]*clientSession), pending: make(map[string]*pendingInfo)}
-}
-
-func (s *serverState) registerClient(name string, sess *clientSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.clients[name]; exists {
-		return fmt.Errorf("name already registered: %s", name)
-	}
-	s.clients[name] = sess
-	obs.ActiveClients.Set(float64(len(s.clients)))
-	return nil
-}
-
-func (s *serverState) getClient(name string) *clientSession {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.clients[name]
-}
-
-func (s *serverState) setPending(id string, p *pendingInfo) {
-	s.mu.Lock()
-	s.pending[id] = p
-	s.mu.Unlock()
-	obs.PendingTunnels.Set(float64(len(s.pending)))
-}
-
-func (s *serverState) popPending(id string) *pendingInfo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p := s.pending[id]
-	delete(s.pending, id)
-	obs.PendingTunnels.Set(float64(len(s.pending)))
-	return p
-}
-
-// removeClient removes a client and closes any pending outside connections waiting for it.
-func (s *serverState) removeClient(name string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.clients, name)
-	closed := 0
-	for id, p := range s.pending {
-		if p.clientName == name {
-			_ = p.conn.Close()
-			delete(s.pending, id)
-			closed++
-		}
-	}
-	obs.ActiveClients.Set(float64(len(s.clients)))
-	obs.PendingTunnels.Set(float64(len(s.pending)))
-	return closed
-}
-
-func (s *serverState) cleanupExpiredPending(maxAge time.Duration) {
-	var expired []*pendingInfo
-	s.mu.Lock()
-	if s.closing {
-		// On shutdown close all.
-		for id, p := range s.pending {
-			expired = append(expired, p)
-			delete(s.pending, id)
-		}
-	} else {
-		cutoff := time.Now().Add(-maxAge)
-		for id, p := range s.pending {
-			if p.created.Before(cutoff) {
-				expired = append(expired, p)
-				delete(s.pending, id)
-			}
-		}
-	}
-	obs.PendingTunnels.Set(float64(len(s.pending)))
-	s.mu.Unlock()
-	for _, p := range expired {
-		// If tunnel never became ready send timeout to client side user.
-		_, _ = p.conn.Write([]byte("HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain\r\nContent-Length: 15\r\n\r\nGateway Timeout"))
-		_ = p.conn.Close()
-		obs.TunnelTimeoutTotal.Inc()
-	}
-}
-
 func main() {
-	var controlAddr string
-	var publicAddr string
-	var dataAddr string
-	var token string
-	var requestTimeout time.Duration
-	var maxHeaderSize int
-	var cleanupInterval time.Duration
-	var metricsAddr string
-	var debug bool
-	var baseDomain string
-	var enableProxyProto bool
-	var addXFF bool
-	flag.StringVar(&controlAddr, "control", ":9000", "address for client control connections")
-	flag.StringVar(&publicAddr, "public", ":8080", "public listener address")
-	flag.StringVar(&dataAddr, "data", ":9001", "data connection listener address")
-	flag.StringVar(&token, "token", "", "shared secret token; if set clients must provide matching token")
-	flag.DurationVar(&requestTimeout, "request-timeout", 10*time.Second, "time limit for client to establish data tunnel")
-	flag.IntVar(&maxHeaderSize, "max-header-size", 32*1024, "maximum allowed initial HTTP header bytes")
-	flag.DurationVar(&cleanupInterval, "pending-cleanup-interval", 5*time.Second, "interval for sweeping expired pending requests")
-	flag.StringVar(&metricsAddr, "metrics", ":9100", "metrics and health listen address")
-	flag.BoolVar(&debug, "debug", false, "enable debug logs")
-	flag.StringVar(&baseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
-	flag.BoolVar(&enableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
-	flag.BoolVar(&addXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
 	flag.Parse()
-
-	if debug {
+	if cfg.Debug {
 		obs.EnableDebug(true)
 	}
-	obs.Info("server.start", obs.Fields{"control": controlAddr, "public": publicAddr, "data": dataAddr, "metrics": metricsAddr})
+	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr})
 	state := newServerState()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Start control listener
-	ctrlLn, err := net.Listen("tcp", controlAddr)
+	ctrlLn, err := net.Listen("tcp", cfg.ControlAddr)
 	if err != nil {
-		obs.Error("listen.control", obs.Fields{"err": err.Error(), "addr": controlAddr})
+		obs.Error("listen.control", obs.Fields{"err": err.Error(), "addr": cfg.ControlAddr})
 		os.Exit(1)
 	}
 	defer ctrlLn.Close()
 
 	// Start data listener
-	dataLn, err := net.Listen("tcp", dataAddr)
+	dataLn, err := net.Listen("tcp", cfg.DataAddr)
 	if err != nil {
-		obs.Error("listen.data", obs.Fields{"err": err.Error(), "addr": dataAddr})
+		obs.Error("listen.data", obs.Fields{"err": err.Error(), "addr": cfg.DataAddr})
 		os.Exit(1)
 	}
 	defer dataLn.Close()
 
 	// Start public listener
-	pubLn, err := net.Listen("tcp", publicAddr)
+	pubLn, err := net.Listen("tcp", cfg.PublicAddr)
 	if err != nil {
-		obs.Error("listen.public", obs.Fields{"err": err.Error(), "addr": publicAddr})
+		obs.Error("listen.public", obs.Fields{"err": err.Error(), "addr": cfg.PublicAddr})
 		os.Exit(1)
 	}
 	defer pubLn.Close()
 
 	// Start metrics / health server (readiness will be false until listeners & goroutines started)
-	go startMetricsServer(metricsAddr, state)
+	go startMetricsServer(cfg.MetricsAddr, state)
 
+	go runCleanupLoop(ctx, state, cfg.CleanupInterval, cfg.RequestTimeout)
 	var wg sync.WaitGroup
-	go runCleanupLoop(ctx, state, cleanupInterval, requestTimeout)
 
 	wg.Add(1)
-	go func() { defer wg.Done(); acceptControl(ctx, ctrlLn, state, token) }()
+	go func() { defer wg.Done(); acceptControl(ctx, ctrlLn, state, &cfg) }()
 	wg.Add(1)
 	go func() { defer wg.Done(); acceptData(ctx, dataLn, state) }()
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		acceptPublic(ctx, pubLn, state, requestTimeout, maxHeaderSize, baseDomain, enableProxyProto, addXFF)
-	}()
+	go func() { defer wg.Done(); acceptPublic(ctx, pubLn, state, &cfg) }()
 
 	state.mu.Lock()
 	state.ready = true
@@ -223,12 +88,12 @@ func main() {
 	_ = dataLn.Close()
 	_ = pubLn.Close()
 	// Final cleanup sweep
-	state.cleanupExpiredPending(requestTimeout)
+	state.cleanupExpiredPending(cfg.RequestTimeout)
 	wg.Wait()
 	obs.Info("server.shutdown.complete", obs.Fields{})
 }
 
-func acceptControl(ctx context.Context, ln net.Listener, state *serverState, token string) {
+func acceptControl(ctx context.Context, ln net.Listener, state *serverState, cfg *Config) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -243,7 +108,7 @@ func acceptControl(ctx context.Context, ln net.Listener, state *serverState, tok
 			}
 			return
 		}
-		go handleControl(c, state, token)
+		go handleControl(c, state, cfg.Token)
 	}
 }
 
@@ -373,7 +238,7 @@ func handleDataConn(c net.Conn, state *serverState) {
 	}()
 }
 
-func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requestTimeout time.Duration, maxHeader int, baseDomain string, proxyProto bool, addXFF bool) {
+func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, cfg *Config) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -388,7 +253,7 @@ func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, requ
 			}
 			return
 		}
-		go handlePublicConn(c, state, requestTimeout, maxHeader, baseDomain, proxyProto, addXFF)
+		go handlePublicConn(c, state, cfg.RequestTimeout, cfg.MaxHeaderSize, cfg.BaseDomain, cfg.EnableProxyProto, cfg.AddXFF)
 	}
 }
 

@@ -3,38 +3,42 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/matst80/showoff/internal/httpx"
 	"github.com/matst80/showoff/internal/proto"
 )
 
-func main() {
-	var serverAddr string
-	var dataAddr string
-	var hostOnly string
-	var name string
-	var token string
-	var target string
-	var stripHost bool
-	var hostRewrite string
-	flag.StringVar(&serverAddr, "server", "127.0.0.1:9000", "server control address")
-	flag.StringVar(&dataAddr, "data", "127.0.0.1:9001", "server data address")
-	flag.StringVar(&hostOnly, "host", "", "base host; if set and --server/--data not explicitly provided, they default to host:9000 & host:9001")
-	flag.StringVar(&name, "name", "demo", "public name to register")
-	flag.StringVar(&token, "token", "", "shared secret token")
-	flag.StringVar(&target, "target", "127.0.0.1:3000", "local address to expose")
-	flag.BoolVar(&stripHost, "strip-host", false, "remove Host header before sending to local target (HTTP/1.1 may break)")
-	flag.StringVar(&hostRewrite, "host-rewrite", "", "rewrite Host header to this value (overrides original)")
-	flag.Parse()
+// activeTunnels tracks currently active proxy tunnels (established data connections).
+var activeTunnels sync.WaitGroup
 
-	// Detect whether user explicitly set server/data flags.
+// waitForDrain waits for all active tunnels to finish or the timeout, whichever first.
+func waitForDrain(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() { activeTunnels.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func main() {
+	flag.Parse()
+	// Determine if user explicitly set server/data flags before applying --host convenience.
 	var serverSet, dataSet bool
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "server" {
@@ -44,32 +48,74 @@ func main() {
 			dataSet = true
 		}
 	})
-	if hostOnly != "" {
+	if cfg.Host != "" {
 		if !serverSet {
-			serverAddr = net.JoinHostPort(hostOnly, "9000")
+			cfg.ServerAddr = net.JoinHostPort(cfg.Host, "9000")
 		}
 		if !dataSet {
-			dataAddr = net.JoinHostPort(hostOnly, "9001")
+			cfg.DataAddr = net.JoinHostPort(cfg.Host, "9001")
 		}
 	}
 
-	log.Printf("showoff client starting name=%s target=%s server=%s data=%s", name, target, serverAddr, dataAddr)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	log.Printf("showoff client starting name=%s target=%s server=%s data=%s", cfg.Name, cfg.Target, cfg.ServerAddr, cfg.DataAddr)
 	for {
-		if err := runOnce(serverAddr, dataAddr, name, token, target, stripHost, hostRewrite); err != nil {
+		if ctx.Err() != nil {
+			if cfg.GracePeriod > 0 {
+				if waitForDrain(cfg.GracePeriod) {
+					log.Printf("all tunnels drained; shutdown complete")
+				} else {
+					log.Printf("grace period expired; exiting with active tunnels still open")
+				}
+			} else {
+				log.Printf("shutdown complete")
+			}
+			return
+		}
+		if err := runOnce(ctx, &cfg); err != nil {
+			if ctx.Err() != nil { // shutting down
+				log.Printf("exiting: %v", ctx.Err())
+				return
+			}
 			log.Printf("control connection ended: %v", err)
 		}
-		time.Sleep(2 * time.Second)
+		// Reconnect delay or exit if shutting down.
+		select {
+		case <-ctx.Done():
+			if cfg.GracePeriod > 0 {
+				log.Printf("shutdown requested; waiting up to %s for active tunnels (%s) to drain", cfg.GracePeriod, cfg.Name)
+				if waitForDrain(cfg.GracePeriod) {
+					log.Printf("tunnels drained; exiting")
+				} else {
+					log.Printf("tunnels not drained before grace timeout; exiting")
+				}
+			}
+			return
+		case <-time.After(2 * time.Second):
+		}
 		log.Printf("reconnecting...")
 	}
 }
 
-func runOnce(serverAddr, dataAddr, name, token, target string, stripHost bool, hostRewrite string) error {
-	c, err := net.Dial("tcp", serverAddr)
+func runOnce(ctx context.Context, cfg *Config) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	c, err := net.Dial("tcp", cfg.ServerAddr)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	if err := writeJSONLine(c, proto.Auth{Token: token, Name: name, Target: target}); err != nil {
+	// Ensure the control connection is closed promptly on shutdown to unblock reads.
+	go func() {
+		<-ctx.Done()
+		_ = c.Close()
+	}()
+	if err := writeJSONLine(c, proto.Auth{Token: cfg.Token, Name: cfg.Name, Target: cfg.Target}); err != nil {
 		return err
 	}
 	rd := bufio.NewReader(c)
@@ -80,7 +126,7 @@ func runOnce(serverAddr, dataAddr, name, token, target string, stripHost bool, h
 	if strings.Contains(line, "error") {
 		return fmt.Errorf("auth failed: %s", line)
 	}
-	log.Printf("registered name=%s", name)
+	log.Printf("registered name=%s", cfg.Name)
 	// Listen for requests
 	for {
 		line, err := rd.ReadString('\n')
@@ -96,13 +142,13 @@ func runOnce(serverAddr, dataAddr, name, token, target string, stripHost bool, h
 			log.Printf("invalid request line: %s", line)
 			continue
 		}
-		go handleRequest(req, dataAddr, target, stripHost, hostRewrite)
+		go handleRequest(req, cfg)
 	}
 }
 
-func handleRequest(req proto.Request, dataAddr, target string, stripHost bool, hostRewrite string) {
+func handleRequest(req proto.Request, cfg *Config) {
 	// Establish data connection first so server doesn't time out.
-	dataConn, err := net.Dial("tcp", dataAddr)
+	dataConn, err := net.Dial("tcp", cfg.DataAddr)
 	if err != nil {
 		log.Printf("dial data error: %v", err)
 		return
@@ -113,7 +159,7 @@ func handleRequest(req proto.Request, dataAddr, target string, stripHost bool, h
 		return
 	}
 	// Now connect to local target.
-	local, err := net.Dial("tcp", target)
+	local, err := net.Dial("tcp", cfg.Target)
 	if err != nil {
 		// Send a quick HTTP 502 so the user sees a response.
 		_, _ = dataConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Gateway"))
@@ -123,7 +169,7 @@ func handleRequest(req proto.Request, dataAddr, target string, stripHost bool, h
 	}
 	// Intercept and possibly modify the initial HTTP headers from dataConn before passing to local.
 	rd := bufio.NewReader(dataConn)
-	modified, bodyRemainder, err := readAndMaybeRewriteHeaders(rd, stripHost, hostRewrite)
+	modified, bodyRemainder, err := readAndMaybeRewriteHeaders(rd, cfg.StripHost, cfg.HostRewrite)
 	if err != nil {
 		log.Printf("header rewrite error (forwarding raw): %v", err)
 		// If we failed, fall back: write what we read so far then continue raw proxy.
@@ -143,15 +189,24 @@ func handleRequest(req proto.Request, dataAddr, target string, stripHost bool, h
 		_, _ = io.Copy(local, bodyRemainder)
 	}
 	// Continue streaming: requests (remaining from rd) to local; responses back to dataConn.
+	activeTunnels.Add(1)
+	var wg sync.WaitGroup
+	var once sync.Once
+	closeBoth := func() { _ = local.Close(); _ = dataConn.Close() }
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		_, _ = io.Copy(local, rd)
-		local.Close()
-		dataConn.Close()
+		once.Do(closeBoth)
 	}()
 	go func() {
+		defer wg.Done()
 		_, _ = io.Copy(dataConn, local)
-		local.Close()
-		dataConn.Close()
+		once.Do(closeBoth)
+	}()
+	go func() { // signal tunnel completion precisely when both copy loops finish
+		wg.Wait()
+		activeTunnels.Done()
 	}()
 }
 
@@ -159,70 +214,23 @@ func handleRequest(req proto.Request, dataAddr, target string, stripHost bool, h
 // Returns the rewritten header bytes (including terminating CRLF CRLF), a buffer containing any body bytes
 // that were read past the header boundary, or an error.
 func readAndMaybeRewriteHeaders(rd *bufio.Reader, stripHost bool, hostRewrite string) ([]byte, *bytes.Buffer, error) {
-	// Peek progressively until we find the header terminator or exceed limit.
-	var buf bytes.Buffer
-	// We'll read line by line up to a cap.
+	// Use shared httpx parser (same max as server for consistency) - 64KiB cap.
 	const maxHeaderBytes = 64 * 1024
-	lines := []string{}
-	for {
-		if buf.Len() > maxHeaderBytes {
-			return buf.Bytes(), nil, fmt.Errorf("header too large")
-		}
-		line, err := rd.ReadString('\n')
-		if err != nil {
-			return nil, nil, err
-		}
-		buf.WriteString(line)
-		lines = append(lines, line)
-		if line == "\r\n" || line == "\n" { // end of headers
-			break
-		}
+	parsed, _, err := httpx.ParseRequest(rd, maxHeaderBytes, nil)
+	if err != nil {
+		return nil, nil, err
 	}
-	origHeader := buf.String()
-	// If no changes requested, return original.
-	if !stripHost && hostRewrite == "" {
-		return []byte(origHeader), nil, nil
+	// Apply rewrites.
+	if stripHost {
+		parsed.StripHost()
+	} else if hostRewrite != "" {
+		parsed.ReplaceHost(hostRewrite)
 	}
-	// Process lines.
 	var out bytes.Buffer
-	hostHandled := false
-	for i, line := range lines {
-		if i == 0 { // request line
-			out.WriteString(line)
-			continue
-		}
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "host:") {
-			if stripHost {
-				continue // drop it
-			}
-			if hostRewrite != "" {
-				out.WriteString("Host: " + hostRewrite + "\r\n")
-				hostHandled = true
-				continue
-			}
-		}
-		out.WriteString(line)
+	if _, err := parsed.WriteTo(&out); err != nil {
+		return nil, nil, err
 	}
-	if !stripHost && hostRewrite != "" && !hostHandled {
-		// Insert before final CRLF (currently last line is CRLF already appended)
-		// We can just add another host header before the blank line; simplest: rewrite by adding before final CRLF.
-		// Remove last blank line if present to insert header then re-add.
-		outs := out.String()
-		if strings.HasSuffix(outs, "\r\n\r\n") {
-			outs = strings.TrimSuffix(outs, "\r\n\r\n")
-			outs += "\r\nHost: " + hostRewrite + "\r\n\r\n"
-			out.Reset()
-			out.WriteString(outs)
-		} else if strings.HasSuffix(outs, "\n\n") {
-			outs = strings.TrimSuffix(outs, "\n\n")
-			outs += "\nHost: " + hostRewrite + "\n\n"
-			out.Reset()
-			out.WriteString(outs)
-		} else {
-			out.WriteString("Host: " + hostRewrite + "\r\n\r\n")
-		}
-	}
+	// Body start already written by WriteTo; remaining body bytes come from rd.
 	return out.Bytes(), nil, nil
 }
 
