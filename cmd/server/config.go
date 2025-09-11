@@ -19,6 +19,13 @@ type Config struct {
 	BaseDomain       string
 	EnableProxyProto bool
 	AddXFF           bool
+	// Rate limiting configuration
+	GlobalConnLimit     int           // Global connection rate per second (0 = disabled)
+	PerClientConnLimit  int           // Per-client connection rate per second (0 = disabled)
+	GlobalReqLimit      int           // Global request rate per second (0 = disabled)  
+	PerClientReqLimit   int           // Per-client request rate per second (0 = disabled)
+	RateLimitBurstSize  int           // Token bucket burst size
+	RateLimitWindow     time.Duration // Rate limiting window duration
 }
 
 var cfg Config
@@ -38,5 +45,12 @@ func init() {
 	flag.StringVar(&cfg.BaseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.BoolVar(&cfg.EnableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
 	flag.BoolVar(&cfg.AddXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
+	// Rate limiting flags
+	flag.IntVar(&cfg.GlobalConnLimit, "global-conn-limit", 100, "global connection rate limit per second (0 = disabled)")
+	flag.IntVar(&cfg.PerClientConnLimit, "per-client-conn-limit", 10, "per-client connection rate limit per second (0 = disabled)")
+	flag.IntVar(&cfg.GlobalReqLimit, "global-req-limit", 1000, "global request rate limit per second (0 = disabled)")
+	flag.IntVar(&cfg.PerClientReqLimit, "per-client-req-limit", 100, "per-client request rate limit per second (0 = disabled)")
+	flag.IntVar(&cfg.RateLimitBurstSize, "rate-limit-burst", 10, "rate limiting burst size")
+	flag.DurationVar(&cfg.RateLimitWindow, "rate-limit-window", time.Second, "rate limiting window duration")
 	flag.Parse()
 }

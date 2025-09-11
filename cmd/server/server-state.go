@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/matst80/showoff/internal/obs"
+	"github.com/matst80/showoff/internal/ratelimit"
 )
 
 type clientSession struct {
@@ -25,15 +26,27 @@ type pendingInfo struct {
 }
 
 type serverState struct {
-	mu      sync.Mutex
-	clients map[string]*clientSession // name -> session
-	pending map[string]*pendingInfo   // requestID -> outside public connection + buffered bytes
-	closing bool
-	ready   bool
+	mu         sync.Mutex
+	clients    map[string]*clientSession // name -> session
+	pending    map[string]*pendingInfo   // requestID -> outside public connection + buffered bytes
+	closing    bool
+	ready      bool
+	rateLimiter *ratelimit.RateLimiter
 }
 
-func newServerState() *serverState {
-	return &serverState{clients: make(map[string]*clientSession), pending: make(map[string]*pendingInfo)}
+func newServerState(cfg *Config) *serverState {
+	rateLimiter := ratelimit.NewRateLimiter(
+		cfg.GlobalConnLimit,
+		cfg.PerClientConnLimit,
+		cfg.GlobalReqLimit,
+		cfg.PerClientReqLimit,
+		cfg.RateLimitBurstSize,
+	)
+	return &serverState{
+		clients:     make(map[string]*clientSession),
+		pending:     make(map[string]*pendingInfo),
+		rateLimiter: rateLimiter,
+	}
 }
 
 func (s *serverState) registerClient(name string, sess *clientSession) error {
@@ -84,6 +97,14 @@ func (s *serverState) removeClient(name string) int {
 	}
 	obs.ActiveClients.Set(float64(len(s.clients)))
 	obs.PendingTunnels.Set(float64(len(s.pending)))
+	
+	// Clean up rate limiter for this client
+	activeClients := make(map[string]bool)
+	for clientName := range s.clients {
+		activeClients[clientName] = true
+	}
+	s.rateLimiter.CleanupExpiredClients(activeClients)
+	
 	return closed
 }
 
