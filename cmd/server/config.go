@@ -19,6 +19,10 @@ type Config struct {
 	BaseDomain       string
 	EnableProxyProto bool
 	AddXFF           bool
+	// Redis configuration for horizontal scaling
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
 }
 
 var cfg Config
@@ -38,5 +42,9 @@ func init() {
 	flag.StringVar(&cfg.BaseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.BoolVar(&cfg.EnableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
 	flag.BoolVar(&cfg.AddXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
+	// Redis flags for horizontal scaling
+	flag.StringVar(&cfg.RedisAddr, "redis-addr", "", "Redis address (host:port) for shared state; if empty, uses in-memory state")
+	flag.StringVar(&cfg.RedisPassword, "redis-password", "", "Redis password for authentication")
+	flag.IntVar(&cfg.RedisDB, "redis-db", 0, "Redis database number")
 	flag.Parse()
 }

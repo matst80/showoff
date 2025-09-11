@@ -31,7 +31,13 @@ func main() {
 		obs.EnableDebug(true)
 	}
 	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr})
-	state := newServerState()
+	
+	// Initialize state store (in-memory or Redis-backed)
+	state, err := newStateStore(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	if err != nil {
+		obs.Error("state.init", obs.Fields{"err": err.Error()})
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -73,16 +79,12 @@ func main() {
 	wg.Add(1)
 	go func() { defer wg.Done(); acceptPublic(ctx, pubLn, state, &cfg) }()
 
-	state.mu.Lock()
-	state.ready = true
-	state.mu.Unlock()
+	state.setReady(true)
 	obs.Info("server.ready", obs.Fields{})
 
 	<-ctx.Done()
 	obs.Info("server.shutdown.signal", obs.Fields{})
-	state.mu.Lock()
-	state.closing = true
-	state.mu.Unlock()
+	state.setClosing(true)
 	_ = ctrlLn.Close()
 	_ = dataLn.Close()
 	_ = pubLn.Close()
@@ -92,7 +94,7 @@ func main() {
 	obs.Info("server.shutdown.complete", obs.Fields{})
 }
 
-func acceptControl(ctx context.Context, ln net.Listener, state *serverState, cfg *Config) {
+func acceptControl(ctx context.Context, ln net.Listener, state StateStore, cfg *Config) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -111,7 +113,7 @@ func acceptControl(ctx context.Context, ln net.Listener, state *serverState, cfg
 	}
 }
 
-func handleControl(c net.Conn, state *serverState, token string) {
+func handleControl(c net.Conn, state StateStore, token string) {
 	defer c.Close()
 	rd := bufio.NewReader(c)
 	line, err := rd.ReadString('\n')
@@ -160,7 +162,7 @@ func handleControl(c net.Conn, state *serverState, token string) {
 	}
 }
 
-func acceptData(ctx context.Context, ln net.Listener, state *serverState) {
+func acceptData(ctx context.Context, ln net.Listener, state StateStore) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,7 +181,7 @@ func acceptData(ctx context.Context, ln net.Listener, state *serverState) {
 	}
 }
 
-func handleDataConn(c net.Conn, state *serverState) {
+func handleDataConn(c net.Conn, state StateStore) {
 	rd := bufio.NewReader(c)
 	line, err := rd.ReadString('\n')
 	if err != nil {
@@ -237,7 +239,7 @@ func handleDataConn(c net.Conn, state *serverState) {
 	}()
 }
 
-func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, cfg *Config) {
+func acceptPublic(ctx context.Context, ln net.Listener, state StateStore, cfg *Config) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -256,7 +258,7 @@ func acceptPublic(ctx context.Context, ln net.Listener, state *serverState, cfg 
 	}
 }
 
-func handlePublicConn(c net.Conn, state *serverState, timeout time.Duration, maxHeader int, baseDomain string, proxyProto bool, addXFF bool) {
+func handlePublicConn(c net.Conn, state StateStore, timeout time.Duration, maxHeader int, baseDomain string, proxyProto bool, addXFF bool) {
 	origRemote := c.RemoteAddr().String()
 	br := bufio.NewReader(c)
 	var pre []byte
@@ -353,7 +355,7 @@ func cryptoRandomID(n int) (string, error) {
 // readInitialHeader reads from conn until end-of-header marker or size limit.
 // (legacy header read helpers removed; replaced by httpx.ParseRequest)
 
-func runCleanupLoop(ctx context.Context, state *serverState, interval, maxAge time.Duration) {
+func runCleanupLoop(ctx context.Context, state StateStore, interval, maxAge time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -383,7 +385,7 @@ func writeJSONLine(w io.Writer, v any) error {
 }
 
 // startMetricsServer serves Prometheus metrics and simple health endpoints.
-func startMetricsServer(addr string, state *serverState) {
+func startMetricsServer(addr string, state StateStore) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -391,10 +393,8 @@ func startMetricsServer(addr string, state *serverState) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		state.mu.Lock()
-		closing := state.closing
-		ready := state.ready
-		state.mu.Unlock()
+		closing := state.isClosing()
+		ready := state.isReady()
 		if closing || !ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
