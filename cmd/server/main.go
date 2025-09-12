@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"os"
 	"os/signal"
@@ -15,6 +16,16 @@ import (
 func main() {
 	if cfg.Debug {
 		obs.EnableDebug(true)
+	}
+	var tlsConfig *tls.Config
+	var err error
+	if cfg.EnableTLS {
+		tlsConfig, err = createServerTLSConfig(&cfg)
+		if err != nil {
+			obs.Error("tls.config", obs.Fields{"err": err.Error()})
+			os.Exit(1)
+		}
+		obs.Info("tls.enabled", obs.Fields{"mtls": cfg.TLSCAFile != ""})
 	}
 	obs.Info("server.start", obs.Fields{"control": cfg.ControlAddr, "public": cfg.PublicAddr, "data": cfg.DataAddr, "metrics": cfg.MetricsAddr})
 	state, err := newStateStore(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
@@ -34,7 +45,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer ctrlLn.Close()
-	dataLn, err := net.Listen("tcp", cfg.DataAddr)
+
+	// Start data listener
+	dataLn, err := createListener(cfg.DataAddr, tlsConfig)
 	if err != nil {
 		obs.Error("listen.data", obs.Fields{"err": err.Error(), "addr": cfg.DataAddr})
 		os.Exit(1)

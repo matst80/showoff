@@ -20,6 +20,11 @@ type Config struct {
 	BaseDomain       string
 	EnableProxyProto bool
 	AddXFF           bool
+	// TLS configuration for mTLS
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSCAFile   string
+	EnableTLS   bool
 	// Redis configuration for horizontal scaling
 	RedisAddr     string
 	RedisPassword string
@@ -44,6 +49,11 @@ func init() {
 	flag.StringVar(&cfg.BaseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.BoolVar(&cfg.EnableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
 	flag.BoolVar(&cfg.AddXFF, "add-xff", true, "append X-Forwarded-For header with original client IP (from PROXY or remote addr)")
+	// TLS flags for mTLS support
+	flag.BoolVar(&cfg.EnableTLS, "tls", false, "enable TLS for control and data connections")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file path")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS private key file path")
+	flag.StringVar(&cfg.TLSCAFile, "tls-ca", "", "TLS CA file for client certificate verification (enables mTLS)")
 	// Redis flags for horizontal scaling
 	flag.StringVar(&cfg.RedisAddr, "redis-addr", "", "Redis address (host:port) for shared state; if empty, uses in-memory state")
 	flag.StringVar(&cfg.RedisPassword, "redis-password", "", "Redis password for authentication")

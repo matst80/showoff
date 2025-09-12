@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,7 +86,17 @@ func runOnce(ctx context.Context, cfg *Config) error {
 		return ctx.Err()
 	default:
 	}
-	c, err := net.Dial("tcp", cfg.ServerAddr)
+
+	var tlsConfig *tls.Config
+	var err error
+	if cfg.EnableTLS {
+		tlsConfig, err = createClientTLSConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("TLS config error: %v", err)
+		}
+	}
+
+	c, err := dialServer(cfg.ServerAddr, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -126,8 +138,18 @@ func runOnce(ctx context.Context, cfg *Config) error {
 }
 
 func handleRequest(req proto.Request, cfg *Config) {
+	var tlsConfig *tls.Config
+	var err error
+	if cfg.EnableTLS {
+		tlsConfig, err = createClientTLSConfig(cfg)
+		if err != nil {
+			log.Printf("TLS config error: %v", err)
+			return
+		}
+	}
+
 	// Establish data connection first so server doesn't time out.
-	dataConn, err := net.Dial("tcp", cfg.DataAddr)
+	dataConn, err := dialServer(cfg.DataAddr, tlsConfig)
 	if err != nil {
 		log.Printf("dial data error: %v", err)
 		return
@@ -226,4 +248,44 @@ func proxy(dst net.Conn, src net.Conn) {
 	defer dst.Close()
 	defer src.Close()
 	_, _ = io.Copy(dst, src)
+}
+
+// createClientTLSConfig creates a TLS configuration for the client
+func createClientTLSConfig(cfg *Config) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	}
+
+	// Load CA certificate if provided
+	if cfg.TLSCAFile != "" {
+		caCert, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, err
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	// Load client certificate and key if provided (for mTLS)
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
+}
+
+// dialServer creates either a plain TCP or TLS connection based on tlsConfig
+func dialServer(addr string, tlsConfig *tls.Config) (net.Conn, error) {
+	if tlsConfig == nil {
+		return net.Dial("tcp", addr)
+	}
+	return tls.Dial("tcp", addr, tlsConfig)
 }
