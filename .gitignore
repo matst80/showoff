@@ -1,16 +1,2 @@
-# Binaries
-client
-server
-
-# Go build artifacts
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Test artifacts  
-*.test
-*.out
-
-# Temporary files
-*.tmp
+/client
+/server

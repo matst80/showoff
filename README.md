@@ -81,6 +81,13 @@ Shortcut: if control & data ports are standard (9000/9001) you can now just spec
 
 ```powershell
 go run ./cmd/client --host 127.0.0.1 --name myapp --token secret --target 127.0.0.1:5173
+go run ./cmd/client --host show.knatofs.se --name myapp --token change-me --target 127.0.0.1:3000
+```
+
+Shortcut: example use of my basement k8s instance
+
+```powershell
+go run ./cmd/client --host show.knatofs.se --name myapp --token change-me --target 127.0.0.1:3000
 ```
 
 Access via (adjust Host header). On Windows with curl you can specify:
@@ -167,8 +174,14 @@ curl -H "Host: myapp.example.com" http://127.0.0.1:8080/
 
 ```powershell
 kubectl port-forward svc/showoff-metrics 9100:9100
-curl http://127.0.0.1:9100/metrics
+curl http://127.0.0.1:9100/show-off/metrics
 curl http://127.0.0.1:9100/readyz
+```
+
+To run the server without the metrics/health HTTP listener (slightly leaner footprint), start with:
+
+```powershell
+go run ./cmd/server --disable-metrics
 ```
 
 ### Token Management
