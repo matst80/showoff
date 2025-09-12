@@ -112,7 +112,7 @@ metadata:
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: "9100"
-  prometheus.io/path: "/show-off/metrics"
+    prometheus.io/path: "/show-off/metrics"
 spec:
   selector:
     app: showoff
