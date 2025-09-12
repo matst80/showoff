@@ -2,27 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/matst80/showoff/internal/obs"
 )
 
-type clientSession struct {
-	name        string
-	controlConn net.Conn
-	lastSeen    time.Time
-}
-
-// pendingInfo tracks an outside public connection waiting for a client data tunnel.
-type pendingInfo struct {
-	conn       net.Conn
-	initialBuf []byte // initial request bytes already consumed from outside
-	clientName string // owning client
-	created    time.Time
-	readyCh    chan struct{} // closed when data tunnel established
-}
+// In-memory state implementation. Redis-backed implementation moved to server-redis-state.go.
 
 type serverState struct {
 	mu           sync.Mutex
@@ -36,6 +22,33 @@ type serverState struct {
 
 func newServerState() *serverState {
 	return &serverState{clients: make(map[string]*clientSession), pending: make(map[string]*pendingInfo)}
+}
+
+// Ensure serverState implements StateStore interface
+var _ StateStore = (*serverState)(nil)
+
+func (s *serverState) setClosing(closing bool) {
+	s.mu.Lock()
+	s.closing = closing
+	s.mu.Unlock()
+}
+
+func (s *serverState) setReady(ready bool) {
+	s.mu.Lock()
+	s.ready = ready
+	s.mu.Unlock()
+}
+
+func (s *serverState) isClosing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closing
+}
+
+func (s *serverState) isReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ready
 }
 
 func (s *serverState) registerClient(name string, sess *clientSession) error {
@@ -93,8 +106,7 @@ func (s *serverState) cleanupExpiredPending(maxAge time.Duration) {
 	var expired []*pendingInfo
 	s.mu.Lock()
 	if s.closing {
-		// On shutdown close all.
-		for id, p := range s.pending {
+		for id, p := range s.pending { // shutdown: expire all
 			expired = append(expired, p)
 			delete(s.pending, id)
 		}
@@ -112,21 +124,21 @@ func (s *serverState) cleanupExpiredPending(maxAge time.Duration) {
 	obs.PendingTunnels.Set(float64(len(s.pending)))
 	s.mu.Unlock()
 	for _, p := range expired {
-		// If tunnel never became ready send timeout to client side user.
 		_, _ = p.conn.Write([]byte("HTTP/1.1 504 Gateway Timeout\r\nContent-Type: text/plain\r\nContent-Length: 15\r\n\r\nGateway Timeout"))
 		_ = p.conn.Close()
 		obs.TunnelTimeoutTotal.Inc()
 	}
 }
 
-func (s *serverState) incrementTunnelCount() {
-	s.mu.Lock()
-	s.totalTunnels++
-	s.mu.Unlock()
-}
-
+// stats helpers
 func (s *serverState) getStats() (int, int, int64, int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.clients), len(s.pending), s.totalTunnels, s.timeouts
+}
+
+func (s *serverState) incrementTunnelCount() {
+	s.mu.Lock()
+	s.totalTunnels++
+	s.mu.Unlock()
 }

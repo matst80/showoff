@@ -164,6 +164,12 @@ curl http://127.0.0.1:9100/show-off/metrics
 curl http://127.0.0.1:9100/readyz
 ```
 
+To run the server without the metrics/health HTTP listener (slightly leaner footprint), start with:
+
+```powershell
+go run ./cmd/server --disable-metrics
+```
+
 ### Token Management
 
 The deployment expects a Secret `showoff-token` with key `token`. Update it:

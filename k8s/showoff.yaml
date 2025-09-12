@@ -6,7 +6,7 @@ metadata:
   labels:
     app: showoff
 spec:
-  replicas: 1
+  replicas: 2 # enable horizontal scaling
   selector:
     matchLabels:
       app: showoff
@@ -95,6 +95,7 @@ spec:
   selector:
     app: showoff
   type: LoadBalancer
+  sessionAffinity: ClientIP # stick control/data TCP to same pod when possible
   ports:
     - name: control
       port: 9000
@@ -129,6 +130,10 @@ metadata:
   name: showoff-wildcard
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/session-cookie-name: showoff_affinity
+    nginx.ingress.kubernetes.io/session-cookie-expires: "21600" # 6h
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "21600"
     # nginx.ingress.kubernetes.io/server-snippet: |
     #   # Optional: improve proxy timeouts for long tunnels
     #   proxy_connect_timeout  5s;
