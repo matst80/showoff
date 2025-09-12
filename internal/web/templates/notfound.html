@@ -1,0 +1,17 @@
+{{ define "title" }}Tunnel Not Found · Showoff{{ end }} {{ define "body" }}
+<div class="card">
+  <span class="badge">404</span>
+  <h2 class="status-err">Tunnel Not Found</h2>
+  <p>
+    The requested tunnel <strong>{{ .Name }}</strong> could not be located. It
+    may have never been registered or it disconnected.
+  </p>
+  <div class="actions">
+    <a class="btn" href="/">Home</a>
+  </div>
+  <div class="dim">
+    Tip: Ensure your client is running with --name {{ .Name }} and the server
+    domain matches.
+  </div>
+</div>
+{{ end }}

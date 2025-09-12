@@ -15,6 +15,7 @@ type Config struct {
 	MaxHeaderSize    int
 	CleanupInterval  time.Duration
 	MetricsAddr      string
+	DisableMetrics   bool
 	Debug            bool
 	BaseDomain       string
 	EnableProxyProto bool
@@ -38,6 +39,7 @@ func init() {
 	flag.IntVar(&cfg.MaxHeaderSize, "max-header-size", 32*1024, "maximum allowed initial HTTP header bytes")
 	flag.DurationVar(&cfg.CleanupInterval, "pending-cleanup-interval", 5*time.Second, "interval for sweeping expired pending requests")
 	flag.StringVar(&cfg.MetricsAddr, "metrics", ":9100", "metrics and health listen address")
+	flag.BoolVar(&cfg.DisableMetrics, "disable-metrics", false, "disable metrics/health HTTP server for lean mode")
 	flag.BoolVar(&cfg.Debug, "debug", false, "enable debug logs")
 	flag.StringVar(&cfg.BaseDomain, "domain", "", "base wildcard domain (e.g. example.com) to extract subdomain names")
 	flag.BoolVar(&cfg.EnableProxyProto, "proxy-protocol", false, "expect and parse HAProxy PROXY protocol v1 line on public connections")
