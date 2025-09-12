@@ -45,11 +45,11 @@ func newRedisStateStore(addr, password string, db int) (*redisStateStore, error)
 		return nil, fmt.Errorf("redis connection failed: %w", err)
 	}
 	return &redisStateStore{
-		client:           rdb,
-		pending:          make(map[string]*pendingInfo),
-		instanceID:       fmt.Sprintf("showoff-%d", time.Now().UnixNano()),
-		cache:            make(map[string]*clientSession),
-		cacheTTL:         15 * time.Second,
+		client:            rdb,
+		pending:           make(map[string]*pendingInfo),
+		instanceID:        fmt.Sprintf("showoff-%d", time.Now().UnixNano()),
+		cache:             make(map[string]*clientSession),
+		cacheTTL:          15 * time.Second,
 		heartbeatInterval: 30 * time.Second,
 		redisKeyTTL:       24 * time.Hour,
 	}, nil
@@ -225,7 +225,9 @@ func (r *redisStateStore) heartbeat() {
 		}
 	}
 	r.mu.Unlock()
-	if len(names) == 0 { return }
+	if len(names) == 0 {
+		return
+	}
 	ctx := context.Background()
 	for _, name := range names {
 		data, err := json.Marshal(clientSessionData{Name: name, LastSeen: now})
@@ -246,9 +248,13 @@ func (r *redisStateStore) heartbeat() {
 func (r *redisStateStore) cleanupCache() {
 	r.mu.Lock()
 	names := make([]string, 0, len(r.cache))
-	for name := range r.cache { names = append(names, name) }
+	for name := range r.cache {
+		names = append(names, name)
+	}
 	r.mu.Unlock()
-	if len(names) == 0 { return }
+	if len(names) == 0 {
+		return
+	}
 	ctx := context.Background()
 	for _, name := range names {
 		ttl, err := r.client.TTL(ctx, "client:"+name).Result()
@@ -259,7 +265,9 @@ func (r *redisStateStore) cleanupCache() {
 			continue
 		}
 		if ttl <= 0 { // expired
-			r.mu.Lock(); delete(r.cache, name); r.mu.Unlock()
+			r.mu.Lock()
+			delete(r.cache, name)
+			r.mu.Unlock()
 		}
 	}
 }
